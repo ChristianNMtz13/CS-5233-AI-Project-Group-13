@@ -236,7 +236,7 @@ class Net(nn.Module):
         self.policy = nn.Linear(64 * 8 * 8, 64) # (... , 64): One score per square, this is what move the network wants to play 
         self.value = nn.Linear(64 * 8 * 8, 1)   # (... , 1): Single number range of -1 to 1. 
                                                 #            Whether the netsssswork thinks its winning or losing. 
-                                                # -1 if the network thinks its definitely losing. 0 for tie. 1 for definitely winning.
+                                                #            -1 if the network thinks its definitely losing. 0 for tie. 1 for definitely winning.
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         x = torch.relu(self.conv1(x))   # (batch, 64, 8, 8)
