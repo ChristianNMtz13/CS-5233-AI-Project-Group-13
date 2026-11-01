@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-import AI_logic as game
+import network
 from training import (
     ReplayBuffer,
     load_checkpoint,
@@ -92,7 +92,7 @@ def main() -> None:
     torch.manual_seed(args.seed)
 
     optimizer = torch.optim.Adam(
-        game.net.parameters(),
+        network.net.parameters(),
         lr=args.learning_rate,
         weight_decay=0.0001
     )
@@ -103,7 +103,7 @@ def main() -> None:
     if args.resume and checkpoint_path.exists():
         completed_games = load_checkpoint(
             checkpoint_path,
-            game.net,
+            network.net,
             optimizer
         )
 
@@ -119,7 +119,7 @@ def main() -> None:
             white_count,
             black_count
         ) = play_self_game(
-            game.net,
+            network.net,
             simulations=args.simulations
         )
 
@@ -130,7 +130,7 @@ def main() -> None:
         )
 
         losses = train_model(
-            game.net,
+            network.net,
             optimizer,
             training_examples,
             epochs=args.epochs,
@@ -141,7 +141,7 @@ def main() -> None:
 
         save_checkpoint(
             checkpoint_path,
-            game.net,
+            network.net,
             optimizer,
             completed_games
         )

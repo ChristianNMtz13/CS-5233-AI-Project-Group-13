@@ -5,7 +5,8 @@ import unittest
 import numpy as np
 import torch
 
-import AI_logic as game
+import bitboard
+import network
 from mcts import (
     MCTS,
     choose_action,
@@ -18,21 +19,21 @@ class AlphaZeroTests(unittest.TestCase):
     def setUp(self) -> None:
         # White pieces in the opening position.
         self.own = (
-            game.square(3, 3)
-            | game.square(4, 4)
+            bitboard.square(3, 3)
+            | bitboard.square(4, 4)
         )
 
         # Black pieces in the opening position.
         self.opponent = (
-            game.square(3, 4)
-            | game.square(4, 3)
+            bitboard.square(3, 4)
+            | bitboard.square(4, 3)
         )
 
     def test_network_shapes(self) -> None:
         """The network should return 64 logits and one value."""
         with torch.no_grad():
-            policy, value = game.net(
-                game.to_tensor(
+            policy, value = network.net(
+                network.to_tensor(
                     self.own,
                     self.opponent
                 )
@@ -73,8 +74,8 @@ class AlphaZeroTests(unittest.TestCase):
             return logits, 0.0
 
         searcher = MCTS(
-            game.legal_moves,
-            game.play_move,
+            bitboard.legal_moves,
+            bitboard.play_move,
             neutral_evaluator
         )
 
@@ -93,7 +94,7 @@ class AlphaZeroTests(unittest.TestCase):
             places=5
         )
 
-        legal_moves = game.legal_moves(
+        legal_moves = bitboard.legal_moves(
             self.own,
             self.opponent
         )

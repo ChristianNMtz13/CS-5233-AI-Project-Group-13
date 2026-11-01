@@ -6,7 +6,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-import AI_logic as game
+import bitboard
+import network
 from mcts import MCTS, choose_action
 
 
@@ -14,6 +15,7 @@ CHECKPOINT = Path(__file__).with_name(
     "reversi_model.pt"
 )
 
+DEFAULT_TIME_LIMIT = 5.0
 SAFETY_MARGIN = 0.5
 MAX_SIMULATIONS = 100000
 
@@ -34,10 +36,10 @@ def load_weights() -> None:
 
     checkpoint = torch.load(
         CHECKPOINT,
-        map_location=game.device
+        map_location=network.device
     )
 
-    game.net.load_state_dict(
+    network.net.load_state_dict(
         checkpoint["model_state"]
     )
 
@@ -50,11 +52,11 @@ def evaluate_position(
     opponent: int
 ) -> tuple[np.ndarray, float]:
     """Ask the network for policy logits and a value."""
-    game.net.eval()
+    network.net.eval()
 
     with torch.no_grad():
-        logits, value = game.net(
-            game.to_tensor(own, opponent)
+        logits, value = network.net(
+            network.to_tensor(own, opponent)
         )
 
     policy_logits = (
@@ -73,12 +75,12 @@ def choose_move(
     time_limit: float | None
 ) -> tuple[int, int]:
     """Select a legal move using timed MCTS."""
-    own, opponent = game.board_to_bitboards(
+    own, opponent = bitboard.board_to_bitboards(
         board,
         turn
     )
 
-    moves = game.legal_moves(
+    moves = bitboard.legal_moves(
         own,
         opponent
     )
@@ -94,7 +96,7 @@ def choose_move(
     )
 
     if time_limit is None:
-        available_time = game.DEFAULT_TIME_LIMIT
+        available_time = DEFAULT_TIME_LIMIT
     else:
         available_time = time_limit
 
@@ -109,8 +111,8 @@ def choose_move(
     )
 
     searcher = MCTS(
-        game.legal_moves,
-        game.play_move,
+        bitboard.legal_moves,
+        bitboard.play_move,
         evaluate_position
     )
 

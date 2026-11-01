@@ -11,7 +11,8 @@ import torch.nn.functional as functional
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
-import AI_logic as game
+import bitboard
+import network
 from mcts import MCTS, choose_action, visit_policy
 
 
@@ -51,40 +52,16 @@ class ReplayBuffer:
         )
 
 
-def state_array(
-    own: int,
-    opponent: int
-) -> np.ndarray:
-    """Create the two input layers expected by the network."""
-    planes = np.zeros(
-        (2, 8, 8),
-        dtype=np.float32
-    )
-
-    for action in range(64):
-        row, column = divmod(action, 8)
-
-        planes[0, row, column] = (
-            own >> action
-        ) & 1
-
-        planes[1, row, column] = (
-            opponent >> action
-        ) & 1
-
-    return planes
-
-
 def initial_position() -> tuple[int, int]:
     """Return the opening position as white and black."""
     white = (
-        game.square(3, 3)
-        | game.square(4, 4)
+        bitboard.square(3, 3)
+        | bitboard.square(4, 4)
     )
 
     black = (
-        game.square(3, 4)
-        | game.square(4, 3)
+        bitboard.square(3, 4)
+        | bitboard.square(4, 3)
     )
 
     return white, black
@@ -101,7 +78,7 @@ def model_evaluator(model: nn.Module):
 
         with torch.no_grad():
             policy_logits, value = model(
-                game.to_tensor(own, opponent)
+                network.to_tensor(own, opponent)
             )
 
         logits = (
@@ -180,16 +157,16 @@ def play_self_game(
     evaluator = model_evaluator(model)
 
     searcher = MCTS(
-        game.legal_moves,
-        game.play_move,
+        bitboard.legal_moves,
+        bitboard.play_move,
         evaluator
     )
 
     while True:
-        moves = game.legal_moves(own, opponent)
+        moves = bitboard.legal_moves(own, opponent)
 
         if moves == 0:
-            opponent_moves = game.legal_moves(
+            opponent_moves = bitboard.legal_moves(
                 opponent,
                 own
             )
@@ -216,7 +193,7 @@ def play_self_game(
 
         history.append(
             (
-                state_array(own, opponent),
+                network.state_array(own, opponent),
                 policy,
                 side_to_move
             )
@@ -232,7 +209,7 @@ def play_self_game(
             temperature=temperature
         )
 
-        own, opponent = game.play_move(
+        own, opponent = bitboard.play_move(
             own,
             opponent,
             1 << action
@@ -354,9 +331,9 @@ def train_model(
             policy_batch,
             value_batch
         ) in loader:
-            state_batch = state_batch.to(game.device)
-            policy_batch = policy_batch.to(game.device)
-            value_batch = value_batch.to(game.device)
+            state_batch = state_batch.to(network.device)
+            policy_batch = policy_batch.to(network.device)
+            value_batch = value_batch.to(network.device)
 
             optimizer.zero_grad()
 
@@ -428,7 +405,7 @@ def load_checkpoint(
     """Load a saved model and return its game count."""
     checkpoint = torch.load(
         Path(path),
-        map_location=game.device
+        map_location=network.device
     )
 
     model.load_state_dict(
