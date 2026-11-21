@@ -1,4 +1,4 @@
-"""Single-threaded Monte Carlo Tree Search for Reversi."""
+# https://github.com/lightvector/KataGo/blob/master/docs/KataGoMethods.md
 
 import math
 import time
@@ -7,138 +7,175 @@ from typing import Callable
 
 import numpy as np
 
+from bitboard import legal_moves, play_move, squares
 
-# The neural network has 64 outputs. Passing is handled inside MCTS.
+
+# Squares are 0 to 63, so 64 means pass.
 PASS_ACTION = 64
 
-PolicyValueFunction = Callable[
-    [int, int],
-    tuple[np.ndarray, float]
-]
+# Most of these values come straight from KataGo. I have idea if these are optimal.
+# Theres also no way to test changes unless we train a dozens of models with different values. Waste of time.
+VALUE_SCALE = 0.25
+CPUCT = 1.0 * VALUE_SCALE
+CPUCT_LOG = 0.45 * VALUE_SCALE
+CPUCT_BASE = 500.0
+STDEV_PRIOR = 0.40 * VALUE_SCALE
+STDEV_PRIOR_WEIGHT = 2.0
+STDEV_SCALE = 0.85
+FPU_REDUCTION = 0.2 * VALUE_SCALE
+ROOT_FPU_REDUCTION = 0.1 * VALUE_SCALE
 
-LegalMovesFunction = Callable[[int, int], int]
+# Training only. Flattens the move odds at the top of the tree so it tries more stuff, mostly early in the game. Good for generalization.
+ROOT_TEMP_EARLY = 1.25
+ROOT_TEMP = 1.1
+TEMP_HALFLIFE = 8.0
 
-PlayMoveFunction = Callable[
-    [int, int, int],
-    tuple[int, int]
-]
+# Training only. Random noise so the bot sometimes tries moves it would normally ignore. Good for generalization
+ROOT_NOISE_CONCENTRATION = 10.83
+ROOT_NOISE_FRACTION = 0.25
+
+# Used when picking the final move, so we don't pick a move that only looks good because we barely checked it.
+LCB_STDEVS = 5.0
+LCB_MIN_PROPORTION = 0.15
+
+# Used only for final tournament bot. Positions the network isn't sure about count for less.
+UNCERTAINTY_COEFF = 0.25 * VALUE_SCALE
+UNCERTAINTY_MAX_WEIGHT = 8.0
+POLICY_OPTIMISM = 1.0
+ROOT_POLICY_OPTIMISM = 0.2
+
+PolicyValueFunction = Callable[[int, int], tuple]
 
 
-@dataclass
+# One position in the search tree. Remembers how often we've been here and how good it is.
+@dataclass(slots=True)
 class Node:
-    """One position in the search tree."""
-
     prior: float = 0.0
     visit_count: int = 0
+    weight_sum: float = 0.0
+    weight_sq_sum: float = 0.0
     value_sum: float = 0.0
+    value_sq_sum: float = 0.0
     children: dict[int, "Node"] = field(default_factory=dict)
-    expanded: bool = False
     terminal_value: float | None = None
+    lower: float = -1.0
+    upper: float = 1.0
 
+    # Have we looked at this node yet.
+    @property
+    def expanded(self) -> bool:
+        return bool(self.children) or self.terminal_value is not None
+
+    # Average result from here, for whoever's turn it is at this node.
     @property
     def mean_value(self) -> float:
-        """Return this position's average search value."""
-        if self.visit_count == 0:
+        if self.weight_sum <= 0.0:
             return 0.0
 
-        return self.value_sum / self.visit_count
+        return self.value_sum / self.weight_sum
 
 
+# The actual search. Same code for training and playing, play=True just turns on the extra heads.
 class MCTS:
-    """AlphaZero-style MCTS using policy and value predictions."""
-
     def __init__(
         self,
-        legal_moves: LegalMovesFunction,
-        play_move: PlayMoveFunction,
-        policy_value: PolicyValueFunction,
-        c_puct: float = 1.5
+        policy_value: PolicyValueFunction | None = None,
+        solver: bool = False,
+        play: bool = False
     ) -> None:
-        self.legal_moves = legal_moves
-        self.play_move = play_move
         self.policy_value = policy_value
-        self.c_puct = c_puct
 
-    @staticmethod
-    def actions_from_bits(move_bits: int) -> list[int]:
-        """Convert a legal-move bitboard into action numbers."""
-        return [
-            action
-            for action in range(64)
-            if move_bits & (1 << action)
-        ]
+        self.play = play
+        self.terminal_weight = UNCERTAINTY_MAX_WEIGHT if play else 1.0
 
+        self.solver = solver
+
+    # Final score is just the piece difference, squished to between -1 and 1.
     @staticmethod
     def terminal_score(own: int, opponent: int) -> float:
-        """Return the final result from the current player's view."""
-        difference = own.bit_count() - opponent.bit_count()
+        return (own.bit_count() - opponent.bit_count()) / 64
 
-        if difference > 0:
-            return 1.0
-
-        if difference < 0:
-            return -1.0
-
-        return 0.0
-
-    def expand(self, node: Node, own: int, opponent: int) -> float:
-        """Evaluate a new position and create its children."""
-        moves = self.legal_moves(own, opponent)
+    # Adds the moves under a node and asks the network what it thinks of the position.
+    # The yields are how we ask the network. The search pauses there and picks the answer up later,
+    # which is what lets use parallelize the games.
+    def expand(
+        self,
+        node: Node,
+        own: int,
+        opponent: int,
+        temperature: float = 1.0,
+        root: bool = False
+    ):
+        moves = legal_moves(own, opponent)
 
         if moves == 0:
-            opponent_moves = self.legal_moves(opponent, own)
+            opponent_moves = legal_moves(opponent, own)
 
             if opponent_moves == 0:
-                node.expanded = True
                 node.terminal_value = self.terminal_score(
                     own,
                     opponent
                 )
-                return node.terminal_value
+                return node.terminal_value, self.terminal_weight
 
-            # The current player must pass.
-            node.children[PASS_ACTION] = Node(prior=1.0)
-            node.expanded = True
+            child = Node(prior=1.0)
+            node.children[PASS_ACTION] = child
 
-            _, value = self.policy_value(own, opponent)
-            return float(value)
+            value, weight = yield from self.expand(child, opponent, own)
+            self.backpropagate([child], value, weight)
+            return -value, weight
 
-        logits, value = self.policy_value(own, opponent)
-        actions = self.actions_from_bits(moves)
-
-        legal_logits = np.asarray(
-            [logits[action] for action in actions],
-            dtype=np.float64
-        )
-
-        # Stable softmax over legal moves only.
-        legal_logits -= np.max(legal_logits)
-        probabilities = np.exp(legal_logits)
-        total = float(probabilities.sum())
-
-        if not np.isfinite(total) or total <= 0.0:
-            probabilities = np.full(
-                len(actions),
-                1.0 / len(actions)
+        # uncertainty-weighted playouts
+        if self.play:
+            logits, value, error = yield own, opponent
+            weight = UNCERTAINTY_COEFF / (
+                error + UNCERTAINTY_COEFF / UNCERTAINTY_MAX_WEIGHT
             )
         else:
-            probabilities /= total
+            logits, value = yield own, opponent
+            weight = 1.0
 
-        for action, probability in zip(actions, probabilities):
-            node.children[action] = Node(
-                prior=float(probability)
-            )
+        actions = squares(moves)
 
-        node.expanded = True
-        return float(value)
+        for action, prior in zip(
+            actions,
+            self.priors(logits, actions, temperature, root)
+        ):
+            node.children[action] = Node(prior=prior)
 
-    def add_root_noise(
+        return float(value), weight
+
+    # Converts network's output into odds for each legal move.
+    def priors(
         self,
-        root: Node,
-        alpha: float = 0.3,
-        fraction: float = 0.25
-    ) -> None:
-        """Add exploration noise during self-play training."""
+        logits: np.ndarray,
+        actions: list[int],
+        temperature: float,
+        root: bool
+    ) -> list[float]:
+        logits = np.asarray(logits, dtype=np.float64)
+
+        # optimistic policy
+        if self.play:
+            normal, optimistic = logits
+            optimism = ROOT_POLICY_OPTIMISM if root else POLICY_OPTIMISM
+            logits = normal + optimism * (optimistic - normal)
+
+        legal_logits = logits[actions] / temperature
+
+        legal_logits -= legal_logits.max()
+        probabilities = np.exp(legal_logits)
+        total = probabilities.sum()
+
+        if not np.isfinite(total):
+            return [1.0 / len(actions)] * len(actions)
+
+        return (probabilities / total).tolist()
+
+    # shaped dirichlet noise, straight from KataGo.
+    # Training only. Mixes some randomness into the move odds at the top of the tree so the bot
+    # sometimes tries moves it thinks are bad. That's how it finds out some of them are actually good.
+    def add_root_noise(self, root: Node) -> None:
         actions = [
             action
             for action in root.children
@@ -148,90 +185,198 @@ class MCTS:
         if not actions:
             return
 
-        noise = np.random.dirichlet(
-            [alpha] * len(actions)
-        )
+        priors = np.array([root.children[action].prior for action in actions])
+        shape = np.log(np.minimum(0.01, priors) + 1e-20)
+        shape = np.maximum(0.0, shape - shape.mean())
+        alphas = np.full(len(actions), 1.0 / len(actions))
+
+        if shape.sum() > 0.0:
+            alphas = 0.5 * (shape / shape.sum() + alphas)
+
+        noise = np.random.dirichlet(ROOT_NOISE_CONCENTRATION * alphas)
 
         for action, random_prior in zip(actions, noise):
             child = root.children[action]
 
             child.prior = (
-                (1.0 - fraction) * child.prior
-                + fraction * float(random_prior)
+                (1.0 - ROOT_NOISE_FRACTION) * child.prior
+                + ROOT_NOISE_FRACTION * float(random_prior)
             )
 
-    def select_child(self, node: Node) -> tuple[int, Node]:
-        """Select a child using the PUCT formula."""
-        parent_scale = math.sqrt(
-            max(1, node.visit_count)
-        )
+    # Picks which move to look at next.
+    def select_child(
+        self,
+        node: Node,
+        fpu_reduction: float = FPU_REDUCTION
+    ) -> tuple[int, Node]:
+        child_weight = 0.0
+        visited_prior = 0.0
+
+        for child in node.children.values():
+            if child.visit_count:
+                child_weight += child.weight_sum
+                visited_prior += child.prior
+
+        mean = node.mean_value
+
+        # dynamic variance-scaled cpuct, KataGo.
+        if node.weight_sum <= 1:
+            stdev = STDEV_PRIOR
+        else:
+            stdev = math.sqrt(
+                max(0.0,
+                    ((mean * mean + STDEV_PRIOR ** 2) * STDEV_PRIOR_WEIGHT + node.value_sq_sum) / (STDEV_PRIOR_WEIGHT + node.weight_sum - 1) - mean * mean)
+                )
+
+        c_puct = CPUCT + CPUCT_LOG * math.log((child_weight + CPUCT_BASE) / CPUCT_BASE)
+
+        explore_scale = (c_puct * math.sqrt(child_weight + 0.01) * (1.0 + STDEV_SCALE * (stdev / STDEV_PRIOR - 1.0)))
+
+        fpu_value = mean - fpu_reduction * math.sqrt(visited_prior)
+
+        floor = node.lower if self.solver else -math.inf
 
         def score(item: tuple[int, Node]) -> float:
             _, child = item
 
-            # The child belongs to the other player's perspective.
-            exploitation = -child.mean_value
+            if -child.lower <= floor:
+                return -math.inf
 
-            exploration = (
-                self.c_puct
-                * child.prior
-                * parent_scale
-                / (1 + child.visit_count)
-            )
+            if child.visit_count > 0:
+                exploitation = -child.mean_value
+            else:
+                exploitation = fpu_value
+
+            exploration = (explore_scale * child.prior / (1 + child.weight_sum))
 
             return exploitation + exploration
 
         return max(node.children.items(), key=score)
 
+    # Plays a move (or a pass) and gives back the new position.
     def next_position(
         self,
         own: int,
         opponent: int,
         action: int
     ) -> tuple[int, int]:
-        """Return the position after one move or pass."""
         if action == PASS_ACTION:
             return opponent, own
 
-        move = 1 << action
-        return self.play_move(own, opponent, move)
+        return play_move(own, opponent, 1 << action)
 
+    # Looks through the old tree for the position we're in now.
+    def find_subtree(
+        self,
+        node: Node,
+        own: int,
+        opponent: int,
+        target_own: int,
+        target_opponent: int
+    ) -> Node | None:
+        if own == target_own and opponent == target_opponent:
+            return node
+
+        if (own | opponent) & ~(target_own | target_opponent):
+            return None
+
+        for action, child in node.children.items():
+            found = self.find_subtree(
+                child,
+                *self.next_position(own, opponent, action),
+                target_own,
+                target_opponent
+            )
+
+            if found is not None:
+                return found
+
+        return None
+
+    # Walks back up the path adding the result to every node. Flips the sign each step since the turns alternate.
     @staticmethod
     def backpropagate(
         path: list[Node],
-        value: float
+        value: float,
+        weight: float = 1.0
     ) -> None:
-        """Send the leaf value back through the search path."""
         for node in reversed(path):
             node.visit_count += 1
-            node.value_sum += value
+            node.weight_sum += weight
+            node.weight_sq_sum += weight * weight
+            node.value_sum += weight * value
+            node.value_sq_sum += weight * value * value
 
-            # Each level switches to the other player's view.
             value = -value
 
-    def search(
+    # Solver stuff. We hit the end of the game so we know the exact score here.
+    # Pass that up the tree and stop once nothing changes.
+    @staticmethod
+    def update_bounds(path: list[Node]) -> None:
+        leaf = path[-1]
+        leaf.lower = leaf.upper = leaf.terminal_value
+
+        for node in reversed(path[:-1]):
+            lower = max(-child.upper for child in node.children.values())
+            upper = max(-child.lower for child in node.children.values())
+
+            if lower == node.lower and upper == node.upper:
+                break
+
+            node.lower = lower
+            node.upper = upper
+
+    # Search a single position.
+    def search(self, own: int, opponent: int, **options) -> Node:
+        root, = run_in_lockstep(
+            lambda positions: [self.policy_value(*p) for p in positions],
+            [self.search_steps(own, opponent, **options)]
+        )
+        return root
+
+    # The main search loop. Walk down the tree, ask the network about the new spot, send the result back up. Repeat.
+    def search_steps(
         self,
         own: int,
         opponent: int,
         simulations: int = 100,
         deadline: float | None = None,
-        add_root_noise: bool = False
-    ) -> Node:
-        """Build and return a tree for the supplied position."""
-        root = Node()
-        self.expand(root, own, opponent)
+        add_root_noise: bool = False,
+        root: Node | None = None
+    ):
+        if root is None:
+            root = Node()
+
+        temperature = 1.0
+
+        # root policy softmax temperature
+        if add_root_noise:
+            temperature = temperature_at(own, opponent, ROOT_TEMP_EARLY, ROOT_TEMP)
+
+        if not root.expanded:
+            root_value, weight = yield from self.expand(root, own, opponent, temperature, root=True)
+            self.backpropagate([root], root_value, weight)
+        elif self.play and legal_moves(own, opponent):
+            logits, _, _ = yield own, opponent
+            priors = self.priors(logits, list(root.children), temperature, True)
+
+            for child, prior in zip(root.children.values(), priors):
+                child.prior = prior
+        elif temperature != 1.0:
+            scaled = [child.prior ** (1.0 / temperature) for child in root.children.values()]
+            total = sum(scaled)
+
+            for child, prior in zip(root.children.values(), scaled):
+                child.prior = prior / total
 
         if add_root_noise:
             self.add_root_noise(root)
 
-        for _ in range(simulations):
-            if (
-                deadline is not None
-                and time.perf_counter() >= deadline
-            ):
+        while root.visit_count <= simulations:
+            if (deadline is not None and time.perf_counter() >= deadline):
                 break
 
-            if root.terminal_value is not None:
+            if root.terminal_value is not None or root.lower == root.upper:
                 break
 
             node = root
@@ -239,107 +384,156 @@ class MCTS:
             current_opponent = opponent
             path = [node]
 
-            while node.expanded and node.children:
-                action, node = self.select_child(node)
+            while node.children:
+                action, node = self.select_child(node, ROOT_FPU_REDUCTION if node is root else FPU_REDUCTION)
 
-                current_own, current_opponent = (
-                    self.next_position(
-                        current_own,
-                        current_opponent,
-                        action
-                    )
-                )
+                current_own, current_opponent = (self.next_position(current_own, current_opponent, action))
 
                 path.append(node)
 
-                if not node.expanded:
-                    break
-
             if node.terminal_value is not None:
-                leaf_value = node.terminal_value
-
-            elif not node.expanded:
-                leaf_value = self.expand(
-                    node,
-                    current_own,
-                    current_opponent
-                )
+                leaf_value, weight = node.terminal_value, self.terminal_weight
 
             else:
-                leaf_value = self.terminal_score(
-                    current_own,
-                    current_opponent
-                )
+                leaf_value, weight = yield from self.expand(node, current_own, current_opponent)
 
-            self.backpropagate(path, leaf_value)
+            if self.solver and node.terminal_value is not None:
+                self.update_bounds(path)
+
+            self.backpropagate(path, leaf_value, weight)
 
         return root
 
 
-def visit_policy(
-    root: Node,
-    temperature: float = 1.0
-) -> np.ndarray:
-    """Convert root visits into a 64-move probability array."""
+# This is what makes training fast. Runs a bunch of searches at once. Each one pauses when it needs
+# the network, then we ask the network about all of them in one big batch. GPUs are way faster doing a lot at once.
+def run_in_lockstep(
+    evaluate: Callable[[list], list],
+    generators: list
+) -> list:
+    results = [None] * len(generators)
+    running = list(enumerate(generators))
+    replies = [None] * len(running)
+
+    while running:
+        requests = []
+        still_running = []
+
+        for (index, generator), reply in zip(running, replies):
+            try:
+                requests.append(generator.send(reply))
+                still_running.append((index, generator))
+            except StopIteration as done:
+                results[index] = done.value
+
+        running = still_running
+
+        if requests:
+            replies = evaluate(requests)
+
+    return results
+
+
+# Starts at early and slides toward late as the game goes on.
+def temperature_at(own: int, opponent: int, early: float, late: float) -> float:
+    moves_played = (own | opponent).bit_count() - 4
+    return late + (early - late) * 0.5 ** (moves_played / TEMP_HALFLIFE)
+
+
+# A pessimistic guess of how good a move is. Moves we've barely checked get knocked down more.
+def lower_bound(child: Node) -> tuple[float, float]:
+    weight, weight_sq = child.weight_sum, child.weight_sq_sum
+
+    if child.visit_count <= 0 or weight <= 0.0 or weight_sq <= 0.0:
+        return -2 * LCB_STDEVS, 2 * LCB_STDEVS
+
+    mean = child.mean_value
+    prior = weight / (weight * weight / weight_sq) ** 3
+    sq_mean = max(child.value_sq_sum / weight, mean * mean + 1e-8)
+    sq_mean = (sq_mean * weight + (sq_mean + VALUE_SCALE ** 2) * prior) / (weight + prior)
+    weight += prior
+    weight_sq += prior * prior
+    radius = LCB_STDEVS * math.sqrt((sq_mean - mean * mean) * weight_sq / (weight * weight))
+    return -mean - radius, radius
+
+
+# Mostly just how much each move got searched.
+# If a less searched move looks much better than the most searched one, give it a boost.
+def play_values(children: dict[int, Node]) -> dict[int, float]:
+    values = {action: child.weight_sum for action, child in children.items()}
+    top = max(values.values())
+    bounds = {action: lower_bound(child) for action, child in children.items()}
+    eligible = [a for a, v in values.items() if 0 < v and LCB_MIN_PROPORTION * top <= v]
+
+    if not eligible:
+        return values
+
+    best = max(eligible, key=lambda a: bounds[a][0])
+    raised = values[best]
+
+    for action, (bound, radius) in bounds.items():
+        excess = bounds[best][0] - bound
+
+        if action != best and excess >= 0:
+            factor = (radius + excess) / (radius + 0.2 * excess)
+            raised = max(raised, factor * factor * values[action])
+
+    values[best] = raised
+    return values
+
+
+# Picks the move we actually play. Normally the most searched move, but if the solver proved a move is safe
+# and the other one doesn't look any better than that, take the safe one.
+def best_action(children: dict[int, Node]) -> int:
+    values = play_values(children)
+
+    def by_value(action: int) -> tuple[float, float]:
+        return values[action], children[action].prior
+
+    safe = max(children, key=lambda a: (-children[a].upper, *by_value(a)))
+    floor = -children[safe].upper
+
+    open_moves = [a for a in children if -children[a].lower > floor]
+
+    if not open_moves:
+        return safe
+
+    best = max(open_moves, key=by_value)
+    child = children[best]
+    value = min(max(-child.mean_value, -child.upper), -child.lower)
+
+    return best if value > floor else safe
+
+
+# What the network learns to copy in training. Moves the search spent more time on get more weight.
+def visit_policy(root: Node) -> np.ndarray:
     policy = np.zeros(64, dtype=np.float32)
+    actions = [action for action in root.children if action != PASS_ACTION]
 
-    legal_children = {
-        action: child
-        for action, child in root.children.items()
-        if action != PASS_ACTION
-    }
-
-    if not legal_children:
+    if not actions:
         return policy
 
-    actions = list(legal_children)
+    weights = np.array([root.children[action].visit_count for action in actions], dtype=np.float64)
 
-    visits = np.asarray(
-        [
-            legal_children[action].visit_count
-            for action in actions
-        ],
-        dtype=np.float64
-    )
+    if weights.sum() <= 0.0:
+        weights = np.array([root.children[action].prior for action in actions])
 
-    if temperature <= 0.0:
-        best_index = int(np.argmax(visits))
-        policy[actions[best_index]] = 1.0
-        return policy
-
-    adjusted = np.power(
-        visits,
-        1.0 / temperature
-    )
-
-    if adjusted.sum() <= 0.0:
-        adjusted = np.asarray(
-            [
-                legal_children[action].prior
-                for action in actions
-            ],
-            dtype=np.float64
-        )
-
-    adjusted /= adjusted.sum()
-
-    for action, probability in zip(actions, adjusted):
-        policy[action] = float(probability)
-
+    policy[actions] = weights / weights.sum()
     return policy
 
 
-def choose_action(
-    root: Node,
-    temperature: float = 0.0
-) -> int:
-    """Select one action from a completed search."""
-    policy = visit_policy(root, temperature)
+# temperature 0 means just play the best move. Above 0 adds some randomness, only used in training so games don't all look the same.
+def choose_action(root: Node, temperature: float = 0.0) -> int:
+    if not temperature:
+        return best_action(root.children)
 
-    if policy.sum() <= 0.0:
-        return PASS_ACTION
+    values = play_values(root.children)
+    actions = list(values)
+    weights = np.array([values[action] for action in actions])
 
-    if temperature <= 0.0:
-        return int(np.argmax(policy))
+    if weights.max() <= 0.0:
+        weights = np.array([root.children[action].prior for action in actions])
 
-    return int(np.random.choice(64, p=policy))
+    weights[weights < min(1.0, weights.max() / 64)] = 0.0
+    weights = (weights / weights.max()) ** (1.0 / temperature)
+    return actions[np.random.choice(len(actions), p=weights / weights.sum())]
