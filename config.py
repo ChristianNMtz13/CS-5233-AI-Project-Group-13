@@ -31,7 +31,7 @@ FAST_SIMULATIONS = SIMULATIONS // 6
 # Games to play in parallel on gpu. Spread across the workers. 
 # This is dependent on your pc. For me 512 games on 16 workers was good for me. Maybe not for you.
 # If you want to change it, start a timer on your phone and see how fast it trains.
-# If you dont have enough ram then decrease PARALLEL.
+# If you dont have enough ram then decrease PARALLEL. Keep PARALLEL as a power of 2. So try 256, 128 etc.
 # Changing workers barely effects ram, it just affects training speed depending on your machine.
 PARALLEL = 512
 WORKERS = 16
