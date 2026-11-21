@@ -15,7 +15,7 @@ HEADS = 2
 # Preferably keep this at increments of PARALLEL * 4. This syncs up the games trained and when we make backup checkpoints.
 GAMES = 0
 
-# If your just going to do a super short training run, then comment out the above and uncomment the below.
+# If you're just going to do a super short training run, then comment out the above and uncomment the below.
 # Change the 1 to however many checkpoints you want to train and then stop.
 # GAMES = PARALLEL * 4 * 1
 
