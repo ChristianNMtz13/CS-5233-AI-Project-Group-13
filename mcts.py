@@ -28,11 +28,11 @@ ROOT_FPU_REDUCTION = 0.1 * VALUE_SCALE
 # Training only. Flattens the move odds at the top of the tree so it tries more stuff, mostly early in the game. Good for generalization.
 ROOT_TEMP_EARLY = 1.25
 ROOT_TEMP = 1.1
-TEMP_HALFLIFE = 8.0
+TEMP_HALFLIFE = 12.0
 
 # Training only. Random noise so the bot sometimes tries moves it would normally ignore. Good for generalization
-ROOT_NOISE_CONCENTRATION = 10.83
-ROOT_NOISE_FRACTION = 0.25
+ROOT_NOISE_CONCENTRATION = 5
+ROOT_NOISE_FRACTION = 0.35
 
 # Used when picking the final move, so we don't pick a move that only looks good because we barely checked it.
 LCB_STDEVS = 5.0
@@ -372,6 +372,9 @@ class MCTS:
         if add_root_noise:
             self.add_root_noise(root)
 
+        # Deepest line this search reached, for the tournament bot's stats.
+        self.max_depth = 0
+
         while root.visit_count <= simulations:
             if (deadline is not None and time.perf_counter() >= deadline):
                 break
@@ -390,6 +393,8 @@ class MCTS:
                 current_own, current_opponent = (self.next_position(current_own, current_opponent, action))
 
                 path.append(node)
+
+            self.max_depth = max(self.max_depth, len(path) - 1)
 
             if node.terminal_value is not None:
                 leaf_value, weight = node.terminal_value, self.terminal_weight

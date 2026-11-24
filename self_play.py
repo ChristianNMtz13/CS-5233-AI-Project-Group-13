@@ -20,10 +20,10 @@ from reversi import reversi
 
 # How random the moves are in training games.
 MOVE_TEMP_EARLY = 0.75
-MOVE_TEMP = 0.15
+MOVE_TEMP = 0.3
 
-# On average the first 5 moves get played straight from the network with no search, so games start out different.
-POLICY_INIT_MOVES = 0.08 * 64
+# On average the first 2.5 moves get played straight from the network with no search, so games start out slightly different.
+POLICY_INIT_MOVES = 0.04 * 64
 POLICY_INIT_TEMP = 2.0
 
 # The net also tries to guess what the board will look like 2 and 8 moves from now. Good learning signal for long term planning.
@@ -128,7 +128,7 @@ def self_game_steps(
             # playout cap randomization
             full = np.random.random() < full_search_fraction
 
-            tree = yield from searcher.search_steps(own, opponent, simulations=simulations if full else fast_simulations, add_root_noise=full, root=tree)
+            tree = yield from searcher.search_steps(own, opponent, simulations=simulations if full else fast_simulations, add_root_noise=True, root=tree if full else None)
 
             policy = visit_policy(tree)
             margin = side_to_move * 64 * tree.mean_value
