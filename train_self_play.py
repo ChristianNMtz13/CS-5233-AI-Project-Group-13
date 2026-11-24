@@ -102,16 +102,10 @@ def main() -> None:
             completed_games, completed_examples = load_checkpoint(checkpoint_path, model, optimizers, average)
         except ValueError as error:
             raise SystemExit(
-                f"{error}\nSet BLOCKS, CHANNELS and HEADS in "
-                "config.py to match it, "
-                "or set CHECKPOINT to a new file to start a new run."
-            )
+                f"{error}\nSet BLOCKS, CHANNELS and HEADS in config.py to match it, or set CHECKPOINT to a new file to start a new run.")
 
         replay.extend(load_replay(replay_path, completed_games))
-        print(
-            f"Resumed {checkpoint_path} after {completed_games} games, "
-            f"{len(replay)} replay examples."
-        )
+        print(f"Resumed {checkpoint_path} after {completed_games} games, {len(replay)} replay examples.")
     else:
         print(f"No {checkpoint_path} found; starting a new run.")
 
@@ -195,9 +189,7 @@ def main() -> None:
             )
 
             if config.BACKUP_EVERY and completed_games % config.BACKUP_EVERY < len(results):
-                backup = checkpoint_path.with_stem(
-                    f"{checkpoint_path.stem}-{completed_games}"
-                )
+                backup = checkpoint_path.with_stem(f"{checkpoint_path.stem}-{completed_games}")
                 shutil.copyfile(checkpoint_path, backup)
                 save_replay(replay_path, replay, completed_games)
                 print(f"Backed up to {backup}, replay buffer to {replay_path}")

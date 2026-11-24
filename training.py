@@ -2,6 +2,7 @@
 # https://arxiv.org/pdf/1902.10565
 
 import contextlib
+import io
 import multiprocessing
 import os
 import random
@@ -271,7 +272,7 @@ def update_average(average: nn.Module, model: nn.Module, first: bool = False) ->
 
 
 # replay window grows sublinearly with data
-# Early on we only keep recent games since the old ones were played badly. The buffer grows as we get more data, just slower than the data does.
+# Early on we only keep recent games since the old ones were played badly. The buffer grows as we get more data, just slower than the data does. Caps off at 20mb anyways for discord.
 def replay_window(examples: int, minimum: int) -> int:
     if examples <= minimum:
         return minimum
@@ -317,20 +318,36 @@ def save_checkpoint(
         )
 
 
+# Discord's limits uploads of around 20mb. We're at 17mb so im adding this now instead of later. The replay save drops its oldest positions until it fits under this.
+REPLAY_FILE_BYTES = 20000000
+
+
 # Saves the replay buffer so we don't have to refill it after a restart.
 def save_replay(
     path: str | Path,
     examples,
     completed_games: int
 ) -> None:
-    
-    with atomic_write(path) as file:
+
+    examples = list(examples)
+
+    while True:
+        buffer = io.BytesIO()
         np.savez_compressed(
-            file,
+            buffer,
             completed_games=completed_games,
             one_copy_each=True,
             **stack_examples(examples)
         )
+        size = buffer.tell()
+
+        if size < REPLAY_FILE_BYTES:
+            break
+
+        examples = examples[-int(len(examples) * REPLAY_FILE_BYTES / size * 0.99):]
+
+    with atomic_write(path) as file:
+        file.write(buffer.getbuffer())
 
 
 def load_replay(path: str | Path, completed_games: int) -> list[TrainingExample]:
