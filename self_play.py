@@ -22,8 +22,9 @@ from reversi import reversi
 MOVE_TEMP_EARLY = 0.75
 MOVE_TEMP = 0.15
 
-# On average the first 2 or 3 moves get played straight from the network with no search, so games start out different.
-POLICY_INIT_MOVES = 0.04 * 64
+# On average the first 5 moves get played straight from the network with no search, so games start out different.
+POLICY_INIT_MOVES = 0.08 * 64
+POLICY_INIT_TEMP = 2.0
 
 # The net also tries to guess what the board will look like 2 and 8 moves from now. Good learning signal for long term planning.
 FUTURE_TURNS = (2, 8)
@@ -101,7 +102,7 @@ def self_game_steps(
 
         logits, _ = yield own, opponent
         actions = bitboard.squares(moves)
-        action = actions[np.random.choice(len(actions), p=searcher.priors(logits, actions, 1.0, True))]
+        action = actions[np.random.choice(len(actions), p=searcher.priors(logits, actions, POLICY_INIT_TEMP, True))]
         own, opponent = searcher.next_position(own, opponent, action)
         side_to_move = -side_to_move
 
